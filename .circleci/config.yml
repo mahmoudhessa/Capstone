@@ -1,0 +1,133 @@
+# Python CircleCI 2.0 configuration file
+#
+# Check https://circleci.com/docs/2.0/language-python/ for more details
+#
+version: 2.1
+jobs:
+
+  Run-Lint:
+    docker:
+      # Use the same Docker base as the project
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+    
+      - run:
+          name: install dependencies
+          command: |            
+            make install
+      - run:
+          name: run lint
+          command: |
+            make lint    
+
+  Build-Push-docker:
+    docker:
+      # Use the same Docker base as the project
+    machine: true
+    working_directory: ~/app
+    steps:
+      - checkout
+      - run:
+          name: Docker image build
+          command: |
+             docker login -u ${Docker_User} -p ${Docker_PWD}
+             docker build -t mahmoudhassan94/cluster-node:2.0 .
+             docker run -d --rm --name nodeapp -p 8080:8080 mahmoudhassan94/cluster-node:2.0
+             sleep 10
+             docker container ls
+             export url="http://localhost:8080"
+             export response=$(curl -s $url)
+             echo "This is response $response"
+             if [[ $response == *"NodeJS app"* ]]; then              
+              docker stop nodeapp
+             else              
+              docker stop nodeapp
+              exit 1
+             fi
+             docker push mahmoudhassan94/cluster-node:2.0
+  
+  Configurate-kubernetes-infrastructure:
+    docker:
+      - image: amazon/aws-cli:2.1.24
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: install eksctl 
+          command: |
+            yum install -y tar gzip
+            curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+            mv /tmp/eksctl /usr/local/bin
+      - run:
+          name: install kubectl 
+          command: |
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            mv kubectl  /usr/local/bin             
+      - run:
+          name: create kubernetes cluster
+          command: |
+            if eksctl get cluster --name udaCapstone-cluster
+            then
+              echo "cluster already exists"
+              aws eks --region us-east-1 update-kubeconfig --name udaCapstone-cluster
+            else
+              echo "creating a new cluster"
+              eksctl create cluster --name udaCapstone-cluster --region us-east-1  --zones us-east-1a,us-east-1b,us-east-1c --nodegroup-name linux-nodes --node-type t2.micro --nodes 2   
+            fi
+
+            kubectl get nodes
+      - run:
+          name: deploy app 
+          command: |
+              TAG=0.1.${CIRCLE_WORKFLOW_ID:0:7} 
+              if kubectl create deployment clusteredapp --image=mahmoudhassan94/cluster-node:2.0
+              then
+                echo "new deployment created"               
+              else
+                echo "deployment already exists!!"
+                POD_NAME=$(kubectl get pod -l app=clusteredapp -o jsonpath="{.items[0].metadata.name}")
+                CONTAINER_NAME=$(kubectl get pods $POD_NAME -o jsonpath='{.spec.containers[*].name}')
+                kubectl set image deployment/clusteredapp $CONTAINER_NAME=mahmoudhassan94/cluster-node:2.0
+                kubectl rollout status deployment/clusteredapp 
+              fi
+    
+
+  # Deploy-App:
+  #   docker:
+  #     - image: amazon/aws-cli:2.1.24
+  #   working_directory: ~/repo
+  #   steps:
+  #     - checkout
+  #     - run:
+  #         name: install kubectl 
+  #         command: |
+  #           curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  #           chmod +x kubectl
+  #           mv kubectl  /usr/local/bin       
+  #     - run:
+  #         name: deploy app 
+  #         command: |
+  #             TAG=0.1.${CIRCLE_WORKFLOW_ID:0:7} 
+  #             if kubectl create deployment clusteredapp --image=mahmoudhassan94/cluster-node:2.0
+  #             then
+  #               echo "new deployment created"               
+  #             else
+  #               echo "deployment already exists!!"
+  #               POD_NAME=$(kubectl get pod -l app=clusteredapp -o jsonpath="{.items[0].metadata.name}")
+  #               CONTAINER_NAME=$(kubectl get pods $POD_NAME -o jsonpath='{.spec.containers[*].name}')
+  #               kubectl set image deployment/clusteredapp $CONTAINER_NAME=mahmoudhassan94/cluster-node:2.0
+  #               kubectl rollout status deployment/clusteredapp 
+  #             fi
+
+workflows:
+  default:
+    jobs:
+      - Run-Lint      
+      - Build-Push-docker:
+          requires: [Run-Lint]
+      - Configurate-kubernetes-infrastructure:
+          requires: [Build-Push-docker] 
+      # - Deploy-App:
+      #     requires: [Configurate-kubernetes-infrastructure]     
